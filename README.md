@@ -10,6 +10,10 @@ npm install
 npm run dev                  # http://localhost:3000
 ```
 
+Needs Node 20+ and the bridge running on `http://127.0.0.1:8000`. Without it the
+catalogue renders its error state — a legitimate thing to look at, but not a
+working shop.
+
 ---
 
 ## Architecture
@@ -30,12 +34,22 @@ browser ──► /api/bff/*  ──►  Django bridge  ──►  WHMCS
   14-day refresh token.
 * `/api/bff/[...path]` proxies everything else. It attaches the bearer token,
   and on a `401` it refreshes **once**, writes the rotated pair back to the
-  cookies, and retries the original request. Concurrent 401s queue on a single
-  in-flight refresh (`refreshTokens`), because rotation would invalidate every
-  other parallel attempt. A second 401 clears the session and answers
-  `session_expired`, which the client turns into a redirect to `/login`.
-* Because the proxy is same-origin, there is no CORS surface and no API base URL
-  in the browser bundle.
+  cookies, and retries the original request. A second 401 clears the session and
+  answers `session_expired`, which the client turns into a redirect to `/login`.
+* Because the proxy is same-origin, there is no CORS surface, and the browser
+  needs no configuration to find the API — the `/api/bff` path is hardcoded in
+  `client.ts`.
+
+Rotation makes the naive "refresh on 401" wrong in two separate ways, and
+`refreshTokens` handles both:
+
+* Requests that 401 **simultaneously** would each spend the same token, and all
+  but one would be rejected as blacklisted. They share one in-flight promise.
+* A request that 401s a moment **later** still carries the old cookie, because
+  the browser had not yet seen the rotated `Set-Cookie`. The settled result is
+  kept for 30 seconds and replayed, so that straggler is not logged out for no
+  reason. Failures are not cached — a dead token should not keep a recovered
+  session locked out.
 
 ### 2. Typed API layer
 
@@ -146,6 +160,96 @@ src/
   is written as a step machine with one step so an OTP stage is an addition
   rather than a rewrite; the session response already carries
   `two_factor_enabled`.
+
+## Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `API_BASE_URL` | Where the **server** reaches the bridge. Never sent to the browser — use an internal address. |
+| `NEXT_PUBLIC_API_BASE_URL` | Fallback for the above. The `NEXT_PUBLIC_` prefix inlines it into the client bundle, so prefer `API_BASE_URL` in production and leave this on something harmless. |
+| `TRUST_PROXY_HEADERS` | `true` only behind a reverse proxy you control. See below. |
+| `NEXT_PUBLIC_CURRENCY_DISPLAY` | `toman` (default) · `rial` · `toman_direct` |
+| `NEXT_PUBLIC_BRAND_NAME` | Header, footer and page titles. |
+
+Both API variables point at the **bridge**. There is no variable for "the URL
+the browser calls" — it always calls this app's own `/api/bff`.
+
+Files load in Next's usual order: `.env.production` is committed and holds no
+secrets; `.env.production.local` overrides it and is gitignored.
+
+## Security posture
+
+* **Tokens are unreachable from JavaScript** — see §1. The readable `lh_user`
+  cookie carries only an email and client id and grants nothing; every response
+  is scoped by the JWT the bridge validates.
+* **CSRF** relies on `SameSite=Lax`, which is sufficient here because no
+  state-changing operation uses `GET`. There is no CSRF token.
+* **Open redirects** are closed by `lib/utils/safe-redirect.ts`. A `?next=`
+  value must match a positive allowlist — `startsWith("/")` alone would let
+  `//evil.com` through, since browsers read that as protocol-relative. The same
+  module checks that a gateway `payment_url` is `http`/`https` before
+  `window.location.href` gets it.
+* **Path traversal** into the bridge is blocked in the proxy. `encodeURIComponent`
+  leaves dots alone, so a `..` segment would survive escaping and `fetch` would
+  normalise it afterwards — enough to climb out of `/api/v1`. Segments are
+  validated, not merely escaped.
+* **Client IP** is rebuilt, not forwarded. The bridge derives the customer's IP
+  from `X-Forwarded-For` for login throttling and WHMCS fraud checks; since this
+  app is itself a proxy, the inbound forwarding headers are stripped (they are
+  browser input) and a single-entry header is written only when
+  `TRUST_PROXY_HEADERS=true`. Pair that with `NUM_PROXIES = 1` in the bridge's
+  `REST_FRAMEWORK` settings — without it the bridge sees this server's address
+  for every customer and the login rate limit becomes global.
+* **Attachment rules are mirrored, not trusted.** `lib/support/attachments.ts`
+  repeats the bridge's extension and size limits so a rejected file fails
+  instantly instead of after a long upload. The server remains the authority.
+
+## Deployment
+
+Requires a Node runtime. Shared PHP/cPanel hosting will not work, and neither
+will `next export`: the cookie handling and the proxy are server-side by design.
+
+```bash
+npm ci
+npm run build
+npx pm2 start "npm run start" --name lithium-front
+npx pm2 save && npx pm2 startup
+```
+
+Behind nginx:
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:3000;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+}
+```
+
+Note `$remote_addr`, not `$proxy_add_x_forwarded_for` — the latter appends
+whatever the client sent, which is the spoofing vector the proxy just closed.
+
+**TLS is mandatory.** Production cookies are set `secure: true`, so over plain
+HTTP the browser discards them and login fails silently with no error to show.
+
+For Docker, add `output: "standalone"` to `next.config.ts` and run
+`node server.js` from `.next/standalone`; putting this and the bridge on one
+compose network lets `API_BASE_URL` use the service name.
+
+## Known gaps
+
+* **No Content-Security-Policy.** Adding one to Next means nonce plumbing for
+  its inline scripts — worth doing deliberately rather than in passing.
+* **Refresh de-duplication is per-process.** Several Node instances behind a
+  load balancer would each keep their own map; a shared cache would be needed if
+  that deployment shape ever matters.
+* **No automated tests.** The money helpers in `lib/format/decimal.ts` are pure
+  functions with awkward edge cases (carry propagation, decimal shifting) and
+  are the obvious first thing to cover.
 
 ## Scripts
 
