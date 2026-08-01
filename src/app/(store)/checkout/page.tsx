@@ -19,6 +19,7 @@ import { localizeDigits } from "@/lib/format";
 import { useI18n } from "@/lib/i18n/provider";
 import { usePaymentMethods, useProducts } from "@/lib/query/hooks";
 import { useSession } from "@/lib/session/provider";
+import { safeExternalUrl } from "@/lib/utils/safe-redirect";
 
 /**
  * Checkout.
@@ -53,16 +54,23 @@ export default function CheckoutPage() {
   const gateways = usePaymentMethods();
 
   const [method, setMethod] = useState<string>("");
-  const [nsInput, setNsInput] = useState<string[]>(["", ""]);
   const [redirecting, setRedirecting] = useState(false);
+
+  /**
+   * The inputs own their own value.
+   *
+   * Seeding them from the store on every change would fight the person typing:
+   * as soon as two hosts became valid, the store update would echo back and
+   * re-expand the field list under the cursor. The store is written on blur
+   * instead, which is also when a half-typed hostname stops being noise.
+   */
+  const [nsInput, setNsInput] = useState<string[]>(() =>
+    nameservers.length >= 2 ? [...nameservers] : ["", ""],
+  );
 
   useEffect(() => {
     if (!method && gateways.data?.length) setMethod(gateways.data[0].module);
   }, [gateways.data, method]);
-
-  useEffect(() => {
-    if (nameservers.length >= 2) setNsInput([...nameservers, "", ""].slice(0, 5));
-  }, [nameservers]);
 
   const hasDomainLine = useMemo(() => lines.some((line) => line.kind === "domain"), [lines]);
 
@@ -81,9 +89,10 @@ export default function CheckoutPage() {
     },
     onSuccess: (result: OrderCreateResult) => {
       clear();
-      if (result.payment_url) {
+      const gateway = safeExternalUrl(result.payment_url);
+      if (gateway) {
         setRedirecting(true);
-        window.location.href = result.payment_url;
+        window.location.href = gateway;
         return;
       }
       router.push(`/panel/orders/${result.order_id}`);
@@ -257,8 +266,8 @@ export default function CheckoutPage() {
                       const next = [...nsInput];
                       next[index] = event.target.value;
                       setNsInput(next);
-                      setNameservers(next.map(normaliseDomain).filter(Boolean));
                     }}
+                    onBlur={() => setNameservers(nsInput.map(normaliseDomain).filter(Boolean))}
                   />
                 ))}
               </div>

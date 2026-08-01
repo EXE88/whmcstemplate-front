@@ -163,7 +163,11 @@ function ProductLineCard({
   const remove = useCart((state) => state.remove);
 
   const product = catalogue.find((item) => item.id === line.productId);
-  const cycles = product ? availableCycles(product) : [line.billingCycle];
+  const offered = product ? availableCycles(product) : [];
+  // A basket saved before the catalogue changed can hold a cycle the plan no
+  // longer sells. Keep it in the list so the select shows what is actually
+  // selected instead of rendering blank.
+  const cycles = offered.includes(line.billingCycle) ? offered : [line.billingCycle, ...offered];
   const price = product ? priceOf(product, line.billingCycle) : null;
 
   return (

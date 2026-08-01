@@ -12,6 +12,7 @@ import { useToast } from "@/components/ui/toast";
 import { formatDate, localizeDigits } from "@/lib/format";
 import { useI18n } from "@/lib/i18n/provider";
 import { useCancelOrder, useOrder } from "@/lib/query/hooks";
+import { safeExternalUrl } from "@/lib/utils/safe-redirect";
 
 /**
  * Order detail.
@@ -40,6 +41,7 @@ export default function OrderDetailPage() {
 
   const data = order.data;
   const cancellable = data.status === "Pending";
+  const payUrl = safeExternalUrl(data.payment_url);
 
   return (
     <div className="space-y-5">
@@ -108,12 +110,12 @@ export default function OrderDetailPage() {
             ) : null}
 
             <div className="mt-4 space-y-2">
-              {data.payment_url && data.payment_status !== "Paid" ? (
+              {payUrl && data.payment_status !== "Paid" ? (
                 <Button
                   fullWidth
                   icon="bi-credit-card"
                   onClick={() => {
-                    window.location.href = data.payment_url!;
+                    window.location.href = payUrl;
                   }}
                 >
                   {t("invoices.pay")}

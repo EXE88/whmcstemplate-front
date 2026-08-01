@@ -20,6 +20,7 @@ import {
   useUpgradeQuote,
 } from "@/lib/query/hooks";
 import { cn } from "@/lib/utils/cn";
+import { safeExternalUrl } from "@/lib/utils/safe-redirect";
 
 type Step = "plan" | "quote";
 
@@ -233,8 +234,9 @@ export default function UpgradePage() {
                           },
                           {
                             onSuccess: (result) => {
-                              if (result.payment_url) {
-                                window.location.href = result.payment_url;
+                              const gateway = safeExternalUrl(result.payment_url);
+                              if (gateway) {
+                                window.location.href = gateway;
                               } else if (result.invoice_id) {
                                 router.push(`/panel/invoices/${result.invoice_id}`);
                               } else {

@@ -13,6 +13,7 @@ import { ErrorBanner, LoadingBlock } from "@/components/ui/states";
 import { ApiError } from "@/lib/api/errors";
 import { useI18n } from "@/lib/i18n/provider";
 import { useSession } from "@/lib/session/provider";
+import { safeNextPath } from "@/lib/utils/safe-redirect";
 
 const schema = z.object({
   email: z.string().min(1).email(),
@@ -49,7 +50,7 @@ function LoginForm() {
   const [step] = useState<Step>("credentials");
   const [failure, setFailure] = useState<unknown>(null);
 
-  const next = params.get("next") || "/panel";
+  const next = safeNextPath(params.get("next"));
   const expired = params.get("expired") === "1";
 
   const {
@@ -63,7 +64,7 @@ function LoginForm() {
     setFailure(null);
     try {
       await signIn(values.email.trim().toLowerCase(), values.password);
-      router.replace(next.startsWith("/") ? next : "/panel");
+      router.replace(next);
       router.refresh();
     } catch (error) {
       if (error instanceof ApiError && error.code === "validation_error") {

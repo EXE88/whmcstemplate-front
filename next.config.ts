@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const config: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Hides the floating Next.js dev badge in the corner of the viewport.
+  devIndicators: false,
   async headers() {
     return [
       {

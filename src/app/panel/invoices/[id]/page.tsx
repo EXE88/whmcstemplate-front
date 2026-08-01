@@ -9,6 +9,7 @@ import { EmptyState, ErrorState, SkeletonCard } from "@/components/ui/states";
 import { formatDate, localizeDigits } from "@/lib/format";
 import { useI18n } from "@/lib/i18n/provider";
 import { useInvoice } from "@/lib/query/hooks";
+import { safeExternalUrl } from "@/lib/utils/safe-redirect";
 
 /**
  * Invoice detail.
@@ -35,6 +36,8 @@ export default function InvoiceDetailPage() {
   const data = invoice.data;
   const items = data.items ?? [];
   const transactions = data.transactions ?? [];
+  // The bridge only sends a payment URL while the invoice is actually payable.
+  const payUrl = safeExternalUrl(data.payment_url);
 
   return (
     <div className="space-y-5">
@@ -110,14 +113,14 @@ export default function InvoiceDetailPage() {
                 <DataRow label={t("invoices.datePaid")} value={formatDate(data.date_paid, locale)} />
               ) : null}
 
-              {data.payment_url ? (
+              {payUrl ? (
                 <Button
                   className="mt-4"
                   fullWidth
                   size="lg"
                   icon="bi-credit-card"
                   onClick={() => {
-                    window.location.href = data.payment_url!;
+                    window.location.href = payUrl;
                   }}
                 >
                   {t("invoices.pay")}

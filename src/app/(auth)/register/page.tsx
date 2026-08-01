@@ -15,6 +15,7 @@ import { toLatinDigits } from "@/lib/format";
 import { useI18n } from "@/lib/i18n/provider";
 import { useSession } from "@/lib/session/provider";
 import { cn } from "@/lib/utils/cn";
+import { safeNextPath } from "@/lib/utils/safe-redirect";
 
 /** Matches the bridge's own phone regex so the field fails locally, not upstream. */
 const PHONE_RE = /^\+?[0-9 \-()]{6,20}$/;
@@ -53,7 +54,7 @@ function RegisterForm() {
 
   const [failure, setFailure] = useState<unknown>(null);
   const [showBilling, setShowBilling] = useState(false);
-  const next = params.get("next") || "/panel";
+  const next = safeNextPath(params.get("next"));
 
   const {
     register,
@@ -92,7 +93,7 @@ function RegisterForm() {
 
     try {
       await signUp(payload);
-      router.replace(next.startsWith("/") ? next : "/panel");
+      router.replace(next);
       router.refresh();
     } catch (error) {
       if (error instanceof ApiError && error.code === "validation_error") {

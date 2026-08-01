@@ -82,15 +82,51 @@ export interface RefreshResult {
 }
 
 /**
- * Concurrent requests that all hit a 401 must not each burn a refresh token —
- * rotation would invalidate the others and log the customer out. They queue on
- * one in-flight call keyed by the token they started with.
+ * One refresh per token, remembered for a short while afterwards.
+ *
+ * Refresh tokens rotate and the old one is blacklisted the moment it is spent.
+ * That makes a naive "refresh on 401" unsafe twice over:
+ *
+ *  - Requests that 401 *simultaneously* would each spend the same token; all
+ *    but one would get a blacklist rejection. Sharing the in-flight promise
+ *    fixes that.
+ *  - A request that 401s a moment *later* still carries the old cookie, because
+ *    the browser had not yet seen the rotated `Set-Cookie`. Deleting the entry
+ *    as soon as the call settled would send that straggler to the login page
+ *    for no reason. So the settled result is retained briefly and replayed.
+ *
+ * The window only has to outlive one round-trip, hence seconds rather than
+ * minutes; entries are evicted on read and the map is capped so a long-running
+ * server cannot accumulate spent tokens.
  */
-const inFlight = new Map<string, Promise<RefreshResult | null>>();
+const REPLAY_WINDOW_MS = 30_000;
+const MAX_TRACKED = 500;
+
+interface RefreshEntry {
+  promise: Promise<RefreshResult | null>;
+  expiresAt: number;
+}
+
+const refreshes = new Map<string, RefreshEntry>();
+
+function evictExpired(now: number): void {
+  for (const [token, entry] of refreshes) {
+    if (entry.expiresAt <= now) refreshes.delete(token);
+  }
+  // Under pathological load, drop oldest-first rather than grow without bound.
+  while (refreshes.size > MAX_TRACKED) {
+    const oldest = refreshes.keys().next();
+    if (oldest.done) break;
+    refreshes.delete(oldest.value);
+  }
+}
 
 export function refreshTokens(refresh: string): Promise<RefreshResult | null> {
-  const existing = inFlight.get(refresh);
-  if (existing) return existing;
+  const now = Date.now();
+  evictExpired(now);
+
+  const existing = refreshes.get(refresh);
+  if (existing) return existing.promise;
 
   const promise = (async () => {
     try {
@@ -103,18 +139,20 @@ export function refreshTokens(refresh: string): Promise<RefreshResult | null> {
       if (!response.ok) return null;
       const data = (await response.json()) as Partial<RefreshResult>;
       if (!data.access) return null;
-      // Rotation is on upstream: keep the new refresh, or the old one if the
-      // install has rotation disabled.
+      // Rotation is upstream's choice: keep the new refresh, or the old one if
+      // the install has rotation disabled.
       return { access: data.access, refresh: data.refresh ?? refresh };
     } catch {
       return null;
-    } finally {
-      // Cleared on the next tick so callers that arrive during teardown still
-      // find the settled promise.
-      setTimeout(() => inFlight.delete(refresh), 0);
     }
   })();
 
-  inFlight.set(refresh, promise);
+  // A failed refresh is not worth replaying — the token is genuinely dead, and
+  // caching the failure would keep a recovered session locked out.
+  void promise.then((result) => {
+    if (result === null) refreshes.delete(refresh);
+  });
+
+  refreshes.set(refresh, { promise, expiresAt: now + REPLAY_WINDOW_MS });
   return promise;
 }

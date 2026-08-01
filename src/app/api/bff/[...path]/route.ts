@@ -24,7 +24,14 @@ import {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** Headers we refuse to forward upstream (hop-by-hop or rewritten by fetch). */
+/**
+ * Headers we refuse to forward upstream.
+ *
+ * Beyond the hop-by-hop ones, the forwarding family is stripped deliberately:
+ * the bridge derives the customer's IP from `X-Forwarded-For` for login
+ * throttling and for WHMCS' fraud checks, and a browser-supplied value there is
+ * pure attacker input. We rebuild that header ourselves below.
+ */
 const STRIPPED_REQUEST_HEADERS = new Set([
   "host",
   "connection",
@@ -34,7 +41,21 @@ const STRIPPED_REQUEST_HEADERS = new Set([
   "accept-encoding",
   "transfer-encoding",
   "upgrade",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-real-ip",
+  "forwarded",
 ]);
+
+/**
+ * Set to `true` only when this app runs behind a reverse proxy you control
+ * (nginx, a load balancer, Cloudflare). It says the inbound `x-forwarded-for`
+ * was written by that proxy and its left-most entry can be believed. Left off,
+ * we send no forwarding header at all and the bridge falls back to this
+ * server's address — which is honest, if coarse.
+ */
+const TRUST_PROXY = process.env.TRUST_PROXY_HEADERS === "true";
 
 const STRIPPED_RESPONSE_HEADERS = new Set([
   "content-encoding",
@@ -51,7 +72,18 @@ interface UpstreamCall {
   body: ArrayBuffer | null;
 }
 
-function buildUrl(request: NextRequest, segments: string[]): string {
+/**
+ * Build the upstream URL, or `null` if the path is not one we will proxy.
+ *
+ * `encodeURIComponent` leaves dots untouched, so a `..` segment would survive
+ * it and `fetch` would then normalise the path — letting a caller climb out of
+ * `/api/v1` and reach anything else served on the bridge's host. Segments are
+ * therefore checked, not just escaped.
+ */
+function buildUrl(request: NextRequest, segments: string[]): string | null {
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    return null;
+  }
   const path = segments.map(encodeURIComponent).join("/");
   const query = request.nextUrl.search;
   // The bridge's Django routes all end in a slash.
@@ -63,7 +95,26 @@ function forwardHeaders(request: NextRequest): Headers {
   request.headers.forEach((value, key) => {
     if (!STRIPPED_REQUEST_HEADERS.has(key.toLowerCase())) headers.set(key, value);
   });
+
+  const clientIp = resolveClientIp(request);
+  if (clientIp) headers.set("x-forwarded-for", clientIp);
+
   return headers;
+}
+
+/**
+ * The caller's address, as far as *we* can vouch for it.
+ *
+ * One entry, no chain: the bridge reads the n-th hop from the right, and a
+ * single trustworthy value is easier to configure against (`NUM_PROXIES=1`)
+ * than a chain whose length depends on the deployment.
+ */
+function resolveClientIp(request: NextRequest): string | null {
+  if (!TRUST_PROXY) return null;
+  const forwarded = request.headers.get("x-forwarded-for");
+  const first = forwarded?.split(",")[0]?.trim();
+  if (first) return first;
+  return request.headers.get("x-real-ip")?.trim() || null;
 }
 
 async function callUpstream(call: UpstreamCall, accessToken: string | null) {
@@ -115,12 +166,20 @@ async function proxy(
     );
   }
 
+  const url = buildUrl(request, path);
+  if (!url) {
+    return NextResponse.json(
+      { error: { code: "not_found", message: "Unknown endpoint.", details: {} } },
+      { status: 404 },
+    );
+  }
+
   const method = request.method.toUpperCase();
   const body =
     method === "GET" || method === "HEAD" ? null : await request.arrayBuffer();
 
   const call: UpstreamCall = {
-    url: buildUrl(request, path),
+    url,
     method,
     headers: forwardHeaders(request),
     body: body && body.byteLength > 0 ? body : null,
